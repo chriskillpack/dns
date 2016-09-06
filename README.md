@@ -9,3 +9,9 @@ _This is incomplete and does not work yet_
 ```bash
 go run main.go
 ```
+
+### Resources
+
+[RFC 1035](https://www.ietf.org/rfc/rfc1035.txt)
+[The TCP/IP Guide](http://www.tcpipguide.com/free/t_DNSMessageHeaderandQuestionSectionFormat.htm)
+`dig`, `tcpdump` & `wireshark`

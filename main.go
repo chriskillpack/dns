@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -14,6 +15,15 @@ const (
 	// DNS query classes
 	IN  = 1
 	ANY = 255
+
+	// DNS header flags
+	FLG_RESPONSE          = 1 << 15
+	FLG_RECURSION_DESIRED = 1 << 8
+
+	FLG_RCODE_NO_ERROR       = 0
+	FLG_RCODE_FORMAT_ERROR   = 1
+	FLG_RCODE_SERVER_FAILURE = 2
+	FLG_RCODE_NAME_ERROR     = 3
 )
 
 type DNSQueryHdrPkt struct {
@@ -35,19 +45,19 @@ type Query struct {
 	pkt    QuestionPkt
 }
 
-func serve(b []byte, _ *net.UDPAddr) {
+func serve(b []byte, s *net.UDPAddr, c *net.UDPConn) {
 	buf := bytes.NewReader(b)
 
-	var hdr DNSQueryHdrPkt
-	err := binary.Read(buf, binary.BigEndian, &hdr)
+	var qHdr DNSQueryHdrPkt
+	err := binary.Read(buf, binary.BigEndian, &qHdr)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	// TODO: Sanity check header values
 
-	queries := make([]Query, 0, hdr.NQueries)
-	for i := 0; i < int(hdr.NQueries); i++ {
+	queries := make([]Query, 0, qHdr.NQueries)
+	for i := 0; i < int(qHdr.NQueries); i++ {
 		q := Query{}
 		// Extract query name
 		for {
@@ -70,13 +80,55 @@ func serve(b []byte, _ *net.UDPAddr) {
 			return
 		}
 
-		if q.pkt.QClass != IN && q.pkt.QClass != ANY {
-			continue
-		}
+		// if q.pkt.QClass != IN && q.pkt.QClass != ANY {
+		// 	continue
+		// }
 
 		queries = append(queries, q)
 	}
-	fmt.Printf("%+v\n%v\n", hdr, queries)
+	fmt.Printf("Q: %+v\n%v\n", qHdr, queries)
+	fmt.Printf("%s\n", hex.EncodeToString(b))
+
+	// TODO: Lookup DNS information (aka Step 2, profit)
+	// For now, respond with name error
+
+	wBuf := new(bytes.Buffer)
+
+	rHdr := DNSQueryHdrPkt{QueryID: qHdr.QueryID}
+	rHdr.Flags = FLG_RESPONSE | FLG_RCODE_NAME_ERROR
+	if rHdr.Flags&FLG_RECURSION_DESIRED == FLG_RECURSION_DESIRED {
+		rHdr.Flags |= FLG_RECURSION_DESIRED
+	}
+
+	rHdr.NQueries = qHdr.NQueries
+	err = binary.Write(wBuf, binary.BigEndian, rHdr)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	for i := 0; i < len(queries); i++ {
+		// Write out label
+		for _, l := range queries[i].Labels {
+			wBuf.WriteByte(byte(len(l)))
+			wBuf.WriteString(l)
+		}
+		wBuf.WriteByte(0)
+
+		// Write out type and class
+		binary.Write(wBuf, binary.BigEndian, queries[i].pkt)
+	}
+
+	fmt.Printf("A: %+v\n", wBuf.Bytes())
+	fmt.Printf("%s\n", hex.EncodeToString(wBuf.Bytes()))
+
+	ob := wBuf.Bytes()
+
+	var n int
+	if n, err = c.WriteToUDP(ob, s); n != len(ob) || err != nil {
+		fmt.Println("Error writing response: %s\n", err)
+		return
+	}
 }
 
 func main() {
@@ -103,6 +155,6 @@ func main() {
 			continue
 		}
 
-		go serve(b[:n], s)
+		go serve(b[:n], s, c)
 	}
 }
