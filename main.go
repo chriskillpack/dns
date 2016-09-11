@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
+	"strings"
 )
 
 const (
@@ -131,7 +133,42 @@ func serve(b []byte, s *net.UDPAddr, c *net.UDPConn) {
 	}
 }
 
+func readNameservers() []string {
+	var file *os.File
+	var err error
+	if file, err = os.Open("/etc/resolv.conf"); err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Println("Error opening /etc/resolv.conf: %v", err)
+		}
+		return []string{}
+	}
+	defer file.Close()
+
+	nameservers := make([]string, 0)
+	s := bufio.NewScanner(file)
+	for s.Scan() {
+		l := s.Text()
+		fields := strings.Fields(l)
+		if len(fields) < 1 {
+			continue
+		}
+
+		switch fields[0] {
+		case "nameserver":
+			addr := fields[1]
+			// Paranoia - only take IP addresses and not host names
+			if ip := net.ParseIP(addr); ip != nil {
+				nameservers = append(nameservers, addr)
+			}
+		}
+	}
+
+	return nameservers
+}
+
 func main() {
+	_ = readNameservers()
+
 	fmt.Println("UDP listen on port", PORT)
 
 	udpAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf(":%d", PORT))
