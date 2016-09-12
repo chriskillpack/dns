@@ -6,19 +6,24 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"strings"
 )
 
 const (
-	PORT = 3030
+	PORT = 3030 // Port to listen on
+)
 
-	// DNS query classes
+// DNS query classes
+const (
 	IN  = 1
 	ANY = 255
+)
 
-	// DNS header flags
+// DNS header flags
+const (
 	FLG_RESPONSE          = 1 << 15
 	FLG_RECURSION_DESIRED = 1 << 8
 
@@ -37,14 +42,40 @@ type DNSQueryHdrPkt struct {
 	NAddRecs  uint16
 }
 
-type QuestionPkt struct {
+type questionPkt struct {
 	QType  uint16
 	QClass uint16
 }
 
-type Query struct {
+type query struct {
 	Labels []string
-	pkt    QuestionPkt
+	pkt    questionPkt
+}
+
+func buildQueryPacket(id, flags uint16, queries []query) ([]byte, error) {
+	hdr := DNSQueryHdrPkt{
+		QueryID:  id,
+		Flags:    flags,
+		NQueries: uint16(len(queries)),
+	}
+	wBuf := new(bytes.Buffer)
+	if err := binary.Write(wBuf, binary.BigEndian, hdr); err != nil {
+		return []byte{}, err
+	}
+
+	for _, q := range queries {
+		for _, l := range q.Labels {
+			// Write out label
+			wBuf.WriteByte(byte(len(l)))
+			wBuf.WriteString(l)
+		}
+		wBuf.WriteByte(0)
+
+		// Write out type and class
+		binary.Write(wBuf, binary.BigEndian, q.pkt)
+	}
+
+	return wBuf.Bytes(), nil
 }
 
 func serve(b []byte, s *net.UDPAddr, c *net.UDPConn) {
@@ -58,9 +89,9 @@ func serve(b []byte, s *net.UDPAddr, c *net.UDPConn) {
 	}
 	// TODO: Sanity check header values
 
-	queries := make([]Query, 0, qHdr.NQueries)
+	queries := make([]query, 0, qHdr.NQueries)
 	for i := 0; i < int(qHdr.NQueries); i++ {
-		q := Query{}
+		q := query{}
 		// Extract query name
 		for {
 			l, _ := buf.ReadByte()
@@ -92,51 +123,39 @@ func serve(b []byte, s *net.UDPAddr, c *net.UDPConn) {
 	fmt.Printf("%s\n", hex.EncodeToString(b))
 
 	// TODO: Lookup DNS information (aka Step 2, profit)
-	// For now, respond with name error
-
-	wBuf := new(bytes.Buffer)
-
-	rHdr := DNSQueryHdrPkt{QueryID: qHdr.QueryID}
-	rHdr.Flags = FLG_RESPONSE | FLG_RCODE_NAME_ERROR
-	if rHdr.Flags&FLG_RECURSION_DESIRED == FLG_RECURSION_DESIRED {
-		rHdr.Flags |= FLG_RECURSION_DESIRED
-	}
-
-	rHdr.NQueries = qHdr.NQueries
-	err = binary.Write(wBuf, binary.BigEndian, rHdr)
+	id := uint16(rand.Int31n(65536))
+	upstream, err := buildQueryPacket(id, FLG_RECURSION_DESIRED, queries)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	fmt.Printf("UQ: %+v\n", upstream)
+	fmt.Printf("%s\n", hex.EncodeToString(upstream))
 
-	for i := 0; i < len(queries); i++ {
-		// Write out label
-		for _, l := range queries[i].Labels {
-			wBuf.WriteByte(byte(len(l)))
-			wBuf.WriteString(l)
-		}
-		wBuf.WriteByte(0)
-
-		// Write out type and class
-		binary.Write(wBuf, binary.BigEndian, queries[i].pkt)
+	// For now, respond with name error
+	aFlags := uint16(FLG_RESPONSE | FLG_RCODE_NAME_ERROR)
+	if qHdr.Flags&FLG_RECURSION_DESIRED == FLG_RECURSION_DESIRED {
+		aFlags |= FLG_RECURSION_DESIRED
 	}
-
-	fmt.Printf("A: %+v\n", wBuf.Bytes())
-	fmt.Printf("%s\n", hex.EncodeToString(wBuf.Bytes()))
-
-	ob := wBuf.Bytes()
+	answer, err := buildQueryPacket(qHdr.QueryID, aFlags, queries)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Printf("A: %+v\n", answer)
+	fmt.Printf("%s\n", hex.EncodeToString(answer))
 
 	var n int
-	if n, err = c.WriteToUDP(ob, s); n != len(ob) || err != nil {
+	if n, err = c.WriteToUDP(answer, s); n != len(answer) || err != nil {
 		fmt.Println("Error writing response: %s\n", err)
 		return
 	}
 }
 
-func readNameservers() []string {
+func readNameservers(resolvconf string) []string {
 	var file *os.File
 	var err error
-	if file, err = os.Open("/etc/resolv.conf"); err != nil {
+	if file, err = os.Open(resolvconf); err != nil {
 		if !os.IsNotExist(err) {
 			fmt.Println("Error opening /etc/resolv.conf: %v", err)
 		}
@@ -144,7 +163,7 @@ func readNameservers() []string {
 	}
 	defer file.Close()
 
-	nameservers := make([]string, 0)
+	var nameservers []string
 	s := bufio.NewScanner(file)
 	for s.Scan() {
 		l := s.Text()
@@ -167,10 +186,10 @@ func readNameservers() []string {
 }
 
 func main() {
-	_ = readNameservers()
+	nameservers := readNameservers("/etc/resolv.conf")
+	fmt.Printf("Found %d nameservers in /etc/resolv.conf\n", len(nameservers))
 
 	fmt.Println("UDP listen on port", PORT)
-
 	udpAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf(":%d", PORT))
 	if err != nil {
 		fmt.Println(err)
